@@ -1,0 +1,71 @@
+{
+  "name": "spark-dash",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "app:dev": "electron .",
+    "app:prepare": "next build && node scripts/prepare-app.mjs",
+    "app:build": "npm run app:prepare && electron-builder --linux AppImage deb"
+  },
+  "dependencies": {
+    "lucide-react": "^1.75.0",
+    "motion": "^14.14.0",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "electron": "^45.3.4",
+    "electron-builder": "^26.18.0",
+    "typescript": "^7.0.2"
+  },
+  "description": "Live GPU, system and Docker operations console",
+  "author": "Spark Dash <spark-dash@localhost>",
+  "main": "electron/main.cjs",
+  "homepage": "https://localhost",
+  "build": {
+    "appId": "com.sparkdash.app",
+    "productName": "Spark Dash",
+    "directories": {
+      "output": "dist-app",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "server",
+        "filter": [
+          "**/*",
+          "**/.next/**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "System",
+      "icon": "build/icon.png",
+      "executableName": "spark-dash",
+      "synopsis": "GPU and Docker operations console",
+      "maintainer": "Spark Dash <spark-dash@localhost>",
+      "syncDesktopName": true
+    },
+    "deb": {
+      "packageName": "spark-dash"
+    }
+  },
+  "desktopName": "spark-dash.desktop"
+}
