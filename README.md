@@ -28,6 +28,10 @@ A live monitoring console for an NVIDIA **GB10 / DGX Spark–class** Linux works
 
 ![Compute](docs/compute.png)
 
+**Model servers (vLLM, Ollama and other host processes)**
+
+![Model servers](docs/models.png)
+
 **Docker containers**
 
 ![Containers](docs/containers.png)
