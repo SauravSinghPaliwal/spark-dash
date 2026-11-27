@@ -78,7 +78,7 @@ Rebuilding (`npm run build`) while `npm start` is running breaks the running ser
 
 ```bash
 npm run app:build      # outputs to dist-app/ (AppImage and .deb, arm64)
-sudo apt install ./dist-app/spark-dash_0.1.0_arm64.deb
+sudo apt install ./dist-app/spark-dash_0.2.0_arm64.deb
 ```
 
 For a quick try without packaging: `npm run app:dev`.
