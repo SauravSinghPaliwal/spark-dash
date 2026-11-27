@@ -9,6 +9,7 @@ A live monitoring console for an NVIDIA **GB10 / DGX Spark–class** Linux works
 - **GPU** – utilization, temperature, power and clocks via `nvidia-smi`; per-process GPU memory (GB10 reports no dedicated VRAM, so GPU memory is the sum of compute-process usage).
 - **CPU** – total load plus a live per-core grid (20 Arm cores: 10× Cortex-X925 + 10× Cortex-A725), temperature and load average.
 - **Memory and storage** – unified memory, swap, NVMe usage and a Docker storage breakdown (units in GiB/TiB).
+- **Model servers** – detects LLM servers that run directly on the host, outside Docker (vLLM, Ollama, llama.cpp, SGLang, TGI, Triton, TensorRT-LLM, LMDeploy, MLC, KoboldCpp, LocalAI, ComfyUI) plus any other Python process using the GPU. Shows model name (read from the server's API or command line), port, GPU memory, CPU, memory, uptime and API health.
 - **Docker** – every container with status, CPU and memory; click one for details.
 - **Compute history** – 1h / 6h / 24h charts with hover crosshair; ring buffers kept server-side.
 - **System health** – six live checks (GPU/CPU temperature, memory, swap, disk, Docker) with an event timeline of changes.
@@ -88,7 +89,7 @@ Notes:
 
 | Path | Purpose |
 |---|---|
-| `lib/sampler.ts` | Singleton sampler reading `/proc`, thermal zones, `df`, `nvidia-smi`, `docker`; history ring buffers |
+| `lib/sampler.ts` | Singleton sampler reading `/proc`, thermal zones, `df`, `nvidia-smi`, `docker`; model-server detection (process scan + `ss` + engine APIs); history ring buffers |
 | `instrumentation.ts` | Starts the sampler when the server boots |
 | `app/api/stream/route.ts` | SSE stream of live snapshots |
 | `app/api/history/route.ts` | History for the 1h / 6h / 24h charts |

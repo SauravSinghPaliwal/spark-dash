@@ -265,3 +265,17 @@ td button{display:inline-grid;place-items:center}
 .event.warn .ev-ic{color:var(--orange)}
 .event i{display:none}
 @media(max-width:600px){.event{grid-template-columns:56px 14px minmax(0,1fr)}}
+
+/* model servers */
+.models-panel { margin-bottom: 20px; }
+.models-panel .engine { font-weight: 600; letter-spacing: .02em; }
+.models-panel .sub { display: block; color: var(--muted, #8f99a8); font-size: 11px; margin-top: 2px; font-weight: 400; }
+.models-panel .portlink { color: var(--blue, #4c90f0); text-decoration: none; margin-right: 8px; }
+.models-panel .portlink:hover { text-decoration: underline; }
+.models-panel .empty code { background: var(--raised, #252a31); padding: 1px 6px; border-radius: 3px; }
+.models-panel table{table-layout:auto;min-width:860px}
+.models-panel th,.models-panel td{width:auto!important;text-align:left!important;padding:12px 14px!important}
+.models-panel th:first-child,.models-panel td:first-child{padding-left:20px!important}
+.models-panel th:last-child,.models-panel td:last-child{padding-right:20px!important}
+.models-panel td{white-space:nowrap}
+.models-panel .status{justify-content:flex-start}

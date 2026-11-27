@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
-import type { Container, Disk, GpuInfo, GpuProc, HistorySeries, HostProc, RangeKey, Snapshot } from "./types";
+import type { Container, Disk, GpuInfo, GpuProc, HistorySeries, HostProc, ModelService, RangeKey, Snapshot } from "./types";
 
 const run = promisify(execFile);
 const exec = async (cmd: string, args: string[], timeout = 8000) => {
@@ -222,6 +222,8 @@ export function getHistory(range: RangeKey): HistorySeries {
 
 /* ---------- Host processes ---------- */
 const CLK = 100;
+interface PidInfo { name: string; ppid: number; start: number; cpu: number; rss: number }
+let pidTable = new Map<number, PidInfo>();
 let prevProcs = new Map<number, number>();
 let prevProcTs = 0;
 
@@ -229,6 +231,7 @@ async function sampleProcs(): Promise<HostProc[]> {
   const now = Date.now();
   const dt = (now - prevProcTs) / 1000;
   const next = new Map<number, number>();
+  const table = new Map<number, PidInfo>();
   const list: HostProc[] = [];
   const pids = (await readdir("/proc")).filter((d) => /^\d+$/.test(d));
   await Promise.all(
@@ -245,12 +248,190 @@ async function sampleProcs(): Promise<HostProc[]> {
         const prev = prevProcs.get(pid);
         const cpu = prev !== undefined && prevProcTs && dt > 0 ? ((ticks - prev) / CLK / dt) * 100 : 0;
         list.push({ pid, name, cpu: Math.max(0, cpu), memBytes: rss });
+        table.set(pid, { name, ppid: Number(f[1]), start: Number(f[19]), cpu: Math.max(0, cpu), rss });
       } catch {}
     }),
   );
   prevProcs = next;
   prevProcTs = now;
+  pidTable = table;
   return list.sort((a, b) => b.cpu - a.cpu || b.memBytes - a.memBytes).slice(0, 8);
+}
+
+
+/* ---------- Model servers running directly on the host (vLLM, Ollama, python scripts...) ---------- */
+interface Engine { label: string; re: RegExp; port: number; api: "openai" | "ollama" | null }
+const ENGINES: Engine[] = [
+  { label: "vLLM", re: /vllm/i, port: 8000, api: "openai" },
+  { label: "Ollama", re: /\bollama\b/i, port: 11434, api: "ollama" },
+  { label: "llama.cpp", re: /llama-server|llama-cli|llama_cpp|llama\.cpp/i, port: 8080, api: "openai" },
+  { label: "SGLang", re: /sglang/i, port: 30000, api: "openai" },
+  { label: "TGI", re: /text-generation-(launcher|server)/i, port: 8080, api: null },
+  { label: "Triton", re: /tritonserver/i, port: 8000, api: null },
+  { label: "TensorRT-LLM", re: /trtllm|tensorrt_llm/i, port: 8000, api: "openai" },
+  { label: "LMDeploy", re: /lmdeploy/i, port: 23333, api: "openai" },
+  { label: "MLC LLM", re: /mlc_llm|mlc-llm/i, port: 8000, api: "openai" },
+  { label: "KoboldCpp", re: /koboldcpp/i, port: 5001, api: null },
+  { label: "LocalAI", re: /local-?ai/i, port: 8080, api: "openai" },
+  { label: "ComfyUI", re: /comfyui/i, port: 8188, api: null },
+];
+const NAME_RE = /python|ollama|llama|triton|vllm|trtllm|text-gen|kobold|local-?ai|sglang|mlc|lmdeploy|comfy/i;
+const IGNORE_RE = /\b(pip3?|grep|pgrep|pytest|tail|less|vim?|nano|code)\b/;
+const CONTAINER_RE = /docker|kubepods|containerd|libpod|crio-|lxc/i;
+
+interface Meta { args: string[]; inContainer: boolean; uid: number }
+const metaCache = new Map<string, Meta>();
+async function metaFor(pid: number, info: PidInfo): Promise<Meta> {
+  const key = `${pid}:${info.start}`;
+  const hit = metaCache.get(key);
+  if (hit) return hit;
+  const [cmd, cg, st] = await Promise.all([
+    readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => ""),
+    readFile(`/proc/${pid}/cgroup`, "utf8").catch(() => ""),
+    stat(`/proc/${pid}`).catch(() => null),
+  ]);
+  const m = { args: cmd.split("\0").filter(Boolean), inContainer: CONTAINER_RE.test(cg), uid: st?.uid ?? -1 };
+  metaCache.set(key, m);
+  if (metaCache.size > 4000) for (const k of [...metaCache.keys()].slice(0, 2000)) metaCache.delete(k);
+  return m;
+}
+
+let passwd: Map<number, string> | null = null;
+async function userName(uid: number) {
+  if (!passwd) {
+    passwd = new Map();
+    const t = await readFile("/etc/passwd", "utf8").catch(() => "");
+    for (const l of t.split("\n")) { const f = l.split(":"); if (f.length > 2) passwd.set(Number(f[2]), f[0]); }
+  }
+  return passwd.get(uid) ?? String(uid);
+}
+
+const base = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+function modelFromArgs(a: string[], label: string): string | undefined {
+  const flag = a.findIndex((x) => /^--(model|model-path|model_path|model-id|model_id|served-model-name|model-name|hf-repo)$/.test(x));
+  if (flag >= 0 && a[flag + 1]) return base(a[flag + 1]);
+  const eq = a.find((x) => /^--(model|model-path|model_path|model-id|model_id|served-model-name)=/.test(x));
+  if (eq) return base(eq.split("=").slice(1).join("="));
+  const sv = a.indexOf("serve");
+  if (sv >= 0 && a[sv + 1] && !a[sv + 1].startsWith("-")) return base(a[sv + 1]);
+  if (label === "llama.cpp") { const m = a.findIndex((x) => x === "-m" || x === "--model"); if (m >= 0 && a[m + 1]) return base(a[m + 1]); }
+  return undefined;
+}
+function scriptFromArgs(a: string[]): string | undefined {
+  const m = a.indexOf("-m");
+  if (m >= 0 && a[m + 1]) return a[m + 1];
+  const s = a.slice(1).find((x) => /\.py$/.test(x));
+  return s ? base(s) : undefined;
+}
+
+/** listening TCP ports per pid, refreshed in the background */
+let listen = new Map<number, number[]>();
+async function sampleListen() {
+  try {
+    const out = await exec("ss", ["-ltnpH"], 4000);
+    const m = new Map<number, Set<number>>();
+    for (const line of out.split("\n")) {
+      const port = Number(line.trim().split(/\s+/)[3]?.split(":").pop());
+      if (!port) continue;
+      for (const x of line.matchAll(/pid=(\d+)/g)) {
+        const pid = Number(x[1]);
+        (m.get(pid) ?? m.set(pid, new Set()).get(pid)!).add(port);
+      }
+    }
+    listen = new Map([...m].map(([k, v]) => [k, [...v]]));
+  } catch {}
+}
+
+/** what the model server's HTTP API says is loaded (cached, refreshed in the background) */
+const probes = new Map<number, { ts: number; ok: boolean; models: string[]; busy: boolean }>();
+function probe(port: number, api: "openai" | "ollama") {
+  const cur = probes.get(port) ?? { ts: 0, ok: false, models: [], busy: false };
+  probes.set(port, cur);
+  if (cur.busy || Date.now() - cur.ts < 8000) return cur;
+  cur.busy = true;
+  (async () => {
+    try {
+      const url = `http://127.0.0.1:${port}${api === "ollama" ? "/api/ps" : "/v1/models"}`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(1500) });
+      if (!r.ok) throw new Error(String(r.status));
+      const j = (await r.json()) as { data?: { id: string }[]; models?: { name?: string; model?: string }[] };
+      cur.models = api === "ollama" ? (j.models ?? []).map((x) => x.name ?? x.model ?? "model") : (j.data ?? []).map((x) => base(x.id));
+      cur.ok = true;
+    } catch {
+      cur.ok = false;
+      cur.models = [];
+    } finally {
+      cur.ts = Date.now();
+      cur.busy = false;
+    }
+  })();
+  return cur;
+}
+
+async function buildServices(gpuProcs: GpuProc[]): Promise<ModelService[]> {
+  const gpuMem = new Map<number, number>();
+  for (const p of gpuProcs) gpuMem.set(p.pid, (gpuMem.get(p.pid) ?? 0) + p.memBytes);
+  type C = { label: string; kind: "llm" | "other"; eng?: Engine; args: string[]; uid: number };
+  const cls = new Map<number, C>();
+  await Promise.all(
+    [...pidTable].map(async ([pid, info]) => {
+      const onGpu = gpuMem.has(pid);
+      if (!onGpu && !NAME_RE.test(info.name)) return;
+      const m = await metaFor(pid, info);
+      if (m.inContainer || !m.args.length) return;
+      const hay = `${info.name} ${m.args.join(" ")}`;
+      if (IGNORE_RE.test(base(m.args[0]))) return;
+      const eng = ENGINES.find((e) => e.re.test(hay));
+      if (eng) cls.set(pid, { label: eng.label, kind: eng.label === "ComfyUI" ? "other" : "llm", eng, args: m.args, uid: m.uid });
+      else if (onGpu && /python/i.test(info.name)) cls.set(pid, { label: "Python", kind: "other", args: m.args, uid: m.uid });
+    }),
+  );
+  const rootOf = (pid: number) => {
+    let cur = pid;
+    for (let i = 0; i < 20; i++) {
+      const pp = pidTable.get(cur)?.ppid;
+      if (pp && cls.get(pp)?.label === cls.get(pid)!.label) cur = pp;
+      else return cur;
+    }
+    return cur;
+  };
+  const groups = new Map<number, number[]>();
+  for (const pid of cls.keys()) { const r = rootOf(pid); (groups.get(r) ?? groups.set(r, []).get(r)!).push(pid); }
+
+  const out: ModelService[] = [];
+  for (const [root, pids] of groups) {
+    const c = cls.get(root)!;
+    const ports = [...new Set(pids.flatMap((p) => listen.get(p) ?? []))].sort((a, b) => a - b);
+    const wellKnown = ports.filter((p) => p < 32768); // drop internal ephemeral ports (zmq, workers)
+    const shown = wellKnown.length ? wellKnown : ports.slice(0, 2);
+    const info = pidTable.get(root)!;
+    const model = [root, ...pids].map((p) => cls.get(p) && modelFromArgs(cls.get(p)!.args, c.label)).find(Boolean);
+    let api: ModelService["api"] = "none";
+    let models: string[] = [];
+    if (c.eng?.api && ports.length) {
+      const p = probe(ports.includes(c.eng.port) ? c.eng.port : ports[0], c.eng.api);
+      api = p.ts === 0 ? "none" : p.ok ? "up" : "down";
+      models = p.models;
+    }
+    out.push({
+      id: `${c.label}-${root}`,
+      engine: c.label,
+      kind: c.kind,
+      title: models[0] ?? model ?? scriptFromArgs(c.args) ?? c.label,
+      pid: root,
+      procs: pids.length,
+      user: await userName(c.uid),
+      cmd: c.args.join(" ").slice(0, 220),
+      ports: shown,
+      cpu: pids.reduce((a, p) => a + (pidTable.get(p)?.cpu ?? 0), 0),
+      memBytes: pids.reduce((a, p) => a + (pidTable.get(p)?.rss ?? 0), 0),
+      gpuMem: pids.reduce((a, p) => a + (gpuMem.get(p) ?? 0), 0),
+      uptime: Math.max(0, os.uptime() - info.start / CLK),
+      models,
+      api,
+    });
+  }
+  return out.sort((a, b) => Number(b.kind === "llm") - Number(a.kind === "llm") || b.gpuMem - a.gpuMem || b.memBytes - a.memBytes);
 }
 
 /* ---------- Static host info ---------- */
@@ -294,6 +475,7 @@ async function tick() {
   try {
     const [cpu, mem, temp, procs, m, osn] = await Promise.all([sampleCpu(), sampleMem(), cpuTemp(), sampleProcs(), model(), osPretty()]);
     const { gpu, procs: gpuProcs } = await sampleGpu(mem.total);
+    const services = await buildServices(gpuProcs);
     const snap: Snapshot = {
       ts: Date.now(),
       host: { hostname: os.hostname(), os: osn, uptime: os.uptime(), load: os.loadavg() as [number, number, number], kernel: os.release(), arch: os.arch() },
@@ -306,6 +488,7 @@ async function tick() {
       dockerError: state.docker.error,
       dockerDisk: state.dockerDisk,
       procs,
+      services,
     };
     state.latest = snap;
     record(state.rings, snap);
@@ -329,6 +512,7 @@ export function startSampler() {
   loop(async () => { state.disks = await sampleDisks(); }, 15000);
   loop(async () => { state.docker = await sampleDocker(); }, 2500);
   loop(async () => { state.dockerDisk = (await sampleDockerDisk()) ?? state.dockerDisk; }, 600_000);
+  loop(sampleListen, 4000);
   loop(tick, 1000);
 }
 

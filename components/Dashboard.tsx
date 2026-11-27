@@ -1,7 +1,7 @@
 "use client";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Container, HistorySeries, RangeKey, Snapshot } from "@/lib/types";
+import type { Container, HistorySeries, ModelService, RangeKey, Snapshot } from "@/lib/types";
 import { Activity, AppWindow, ArrowLeftRight, ArrowUpRight, Asterisk, Box, BrainCircuit, CircleCheck, Container as ContainerIcon, Cpu, Database, Download, Globe, Gpu, HardDrive, HeartPulse, LayoutDashboard, MemoryStick, Pause, Play, Radio, Server, Thermometer, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { AnimatedNumber, Meter, Spark, fmtBytes, fmtParts } from "./ui";
 
@@ -13,6 +13,10 @@ const appIcon = (c: { name: string; image: string }): LucideIcon => {
   if (/frontend|web|nginx|ui|next|react/.test(k)) return Globe;
   if (/backend|api|server|uvicorn|fastapi/.test(k)) return Server;
   return Box;
+};
+const fmtDur = (s: number) => {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
 };
 const eventIcon: Record<string, LucideIcon> = { NODE: Server, DOCKER: ContainerIcon, GPU: Gpu, ALERT: TriangleAlert };
 
@@ -256,7 +260,7 @@ export default function Dashboard() {
   }, [drawer]);
 
   useEffect(() => {
-    const ids = ["overview", "compute", "memory", "workloads", "applications", "health"];
+    const ids = ["overview", "compute", "memory", "models", "workloads", "applications", "health"];
     const obs = new IntersectionObserver((es) => es.forEach((e) => e.isIntersecting && setActive(e.target.id)), { rootMargin: "-30% 0px -60% 0px" });
     ids.forEach((id) => { const el = document.getElementById(id); if (el) obs.observe(el); });
     return () => obs.disconnect();
@@ -288,7 +292,7 @@ export default function Dashboard() {
   const allOk = healthy === checks.length;
   const nav: [string, LucideIcon, string, number?][] = [
     ["overview", LayoutDashboard, "Overview"], ["compute", Cpu, "Compute"], ["memory", MemoryStick, "Memory & storage"],
-    ["workloads", ContainerIcon, "Containers", s?.containers.length], ["applications", AppWindow, "Applications"], ["health", HeartPulse, "System health"],
+    ["models", BrainCircuit, "Model servers", s?.services.length], ["workloads", ContainerIcon, "Containers", s?.containers.length], ["applications", AppWindow, "Applications"], ["health", HeartPulse, "System health"],
   ];
   const coreModel = s?.cpu.model.split(" + ") ?? [];
 
@@ -416,6 +420,38 @@ export default function Dashboard() {
                   <div className="concept">Reference-based render · <a href="https://www.altoscomputing.com/en-IN/products/detail/GB10-F1" target="_blank" rel="noreferrer">Hardware specifications</a></div>
                 </motion.section>
               </div>
+
+              <motion.section id="models" className="panel models-panel" {...enter(7)}>
+                <div className="panel-head">
+                  <h2>Model servers <span className="count">{s.services.length}</span></h2>
+                  <span className="muted">vLLM, Ollama, llama.cpp and other processes running directly on the host (not in Docker)</span>
+                </div>
+                {s.services.length === 0 ? (
+                  <div className="empty">No model server detected on the host. Start one (for example <code>vllm serve …</code> or <code>ollama serve</code>) and it will appear here.</div>
+                ) : (
+                  <div className="tablewrap">
+                    <table>
+                      <thead><tr><th>SERVER</th><th>MODEL / SCRIPT</th><th>PORT</th><th>GPU MEM</th><th>CPU</th><th>MEMORY</th><th>UPTIME</th><th>STATUS</th></tr></thead>
+                      <tbody>
+                        <AnimatePresence initial={false}>
+                          {s.services.map((v) => (
+                            <motion.tr key={v.id} layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }} title={v.cmd}>
+                              <td><span className="cube"><Ic i={v.kind === "llm" ? BrainCircuit : Activity} size={14} /></span><span className="engine">{v.engine}</span></td>
+                              <td>{v.title}<small className="sub">pid {v.pid}{v.procs > 1 ? ` · ${v.procs} processes` : ""} · {v.user}{v.models.length > 1 ? ` · ${v.models.length} models loaded` : ""}</small></td>
+                              <td>{v.ports.length ? v.ports.map((p) => <a key={p} className="portlink" href={`http://${typeof window !== "undefined" ? window.location.hostname : "localhost"}:${p}`} target="_blank" rel="noreferrer">:{p}</a>) : "–"}</td>
+                              <td>{v.gpuMem > 0 ? fmtBytes(v.gpuMem) : "–"}</td>
+                              <td>{v.cpu.toFixed(1)}%</td>
+                              <td>{fmtBytes(v.memBytes)}</td>
+                              <td>{fmtDur(v.uptime)}</td>
+                              <td><span className={`status ${v.api === "down" ? "warn" : ""}`}>● {v.api === "up" ? "Serving" : v.api === "down" ? "API not responding" : "Running"}</span></td>
+                            </motion.tr>
+                          ))}
+                        </AnimatePresence>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </motion.section>
 
               <div className="lower-grid">
                 <motion.section id="workloads" className="panel" {...enter(8)}>
